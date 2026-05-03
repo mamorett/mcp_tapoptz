@@ -1,9 +1,14 @@
 import os
 import datetime
+import logging
 from typing import Tuple, List, Optional
 import httpx
 from onvif import ONVIFCamera as ONVIFCameraClient
 from fastmcp import FastMCP
+
+# Configure logging to stderr for MCP compatibility
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mcp-tapoptz")
 
 class ONVIFCamera:
     """
@@ -11,6 +16,7 @@ class ONVIFCamera:
     """
 
     def __init__(self, ip: str, port: int, username: str, password: str):
+        logger.info(f"Connecting to camera at {ip}:{port}...")
         self.camera = ONVIFCameraClient(ip, port, username, password)
         self.ptz = self.camera.create_ptz_service()
         self.media = self.camera.create_media_service()
@@ -18,14 +24,14 @@ class ONVIFCamera:
         self.password = password
 
         # Fetch the first profile token
+        logger.info("Fetching media profiles...")
         profiles = self.media.GetProfiles()
+        if not profiles:
+            raise Exception("No media profiles found on camera")
         self.token = profiles[0].token
+        logger.info(f"Connected successfully. Using profile token: {self.token}")
 
     def absolute_move(self, pan: float, tilt: float, zoom: float) -> dict:
-        """
-        Move pan, tilt or zoom to an absolute destination.
-        Pan/Tilt usually -1.0 to 1.0, Zoom 0.0 to 1.0.
-        """
         request = self.ptz.create_type('AbsoluteMove')
         request.ProfileToken = self.token
         request.Position = {'PanTilt': {'x': pan, 'y': tilt}, 'Zoom': zoom}
@@ -33,10 +39,6 @@ class ONVIFCamera:
         return {"status": "success", "action": "absolute_move", "pan": pan, "tilt": tilt, "zoom": zoom}
 
     def continuous_move(self, pan: float, tilt: float, zoom: float) -> dict:
-        """
-        Start continuous Pan/Tilt and Zoom movements at given speeds.
-        Speeds usually -1.0 to 1.0.
-        """
         request = self.ptz.create_type('ContinuousMove')
         request.ProfileToken = self.token
         request.Velocity = {'PanTilt': {'x': pan, 'y': tilt}, 'Zoom': zoom}
@@ -44,9 +46,6 @@ class ONVIFCamera:
         return {"status": "success", "action": "continuous_move", "pan_speed": pan, "tilt_speed": tilt, "zoom_speed": zoom}
 
     def relative_move(self, pan: float, tilt: float, zoom: float) -> dict:
-        """
-        Move relative to the current position.
-        """
         request = self.ptz.create_type('RelativeMove')
         request.ProfileToken = self.token
         request.Translation = {'PanTilt': {'x': pan, 'y': tilt}, 'Zoom': zoom}
@@ -54,38 +53,25 @@ class ONVIFCamera:
         return {"status": "success", "action": "relative_move", "pan_delta": pan, "tilt_delta": tilt, "zoom_delta": zoom}
 
     def stop_move(self) -> dict:
-        """
-        Stop ongoing pan, tilt and zoom movements.
-        """
         request = self.ptz.create_type('Stop')
         request.ProfileToken = self.token
         self.ptz.Stop(request)
         return {"status": "success", "action": "stop_move"}
 
     def set_home_position(self) -> dict:
-        """
-        Save current position as the home position.
-        """
         request = self.ptz.create_type('SetHomePosition')
         request.ProfileToken = self.token
         self.ptz.SetHomePosition(request)
-        # Stop is often needed to finish the operation cleanly on some cameras
         self.ptz.Stop({'ProfileToken': self.token})
         return {"status": "success", "action": "set_home_position"}
 
     def go_home_position(self) -> dict:
-        """
-        Move the PTZ device to its home position.
-        """
         request = self.ptz.create_type('GotoHomePosition')
         request.ProfileToken = self.token
         self.ptz.GotoHomePosition(request)
         return {"status": "success", "action": "go_home_position"}
 
     def get_ptz_status(self) -> Tuple[float, float, float]:
-        """
-        Request current PTZ status. Returns (pan, tilt, zoom).
-        """
         request = self.ptz.create_type('GetStatus')
         request.ProfileToken = self.token
         ptz_status = self.ptz.GetStatus(request)
@@ -95,9 +81,6 @@ class ONVIFCamera:
         return pan, tilt, zoom
 
     def set_preset(self, preset_name: str) -> dict:
-        """
-        Save current position as a named preset.
-        """
         presets = self._get_presets_complete()
         for preset in presets:
             if str(preset.Name) == preset_name:
@@ -110,9 +93,6 @@ class ONVIFCamera:
         return {"status": "success", "action": "set_preset", "name": preset_name}
 
     def get_presets(self) -> List[Tuple[int, str]]:
-        """
-        List all PTZ presets as (index, name).
-        """
         ptz_get_presets = self._get_presets_complete()
         presets = []
         for i, preset in enumerate(ptz_get_presets):
@@ -120,15 +100,11 @@ class ONVIFCamera:
         return presets
 
     def _get_presets_complete(self):
-        """Internal helper to get full preset objects."""
         request = self.ptz.create_type('GetPresets')
         request.ProfileToken = self.token
         return self.ptz.GetPresets(request)
 
     def remove_preset(self, preset_name: str) -> dict:
-        """
-        Remove a PTZ preset by name.
-        """
         presets = self._get_presets_complete()
         request = self.ptz.create_type('RemovePreset')
         request.ProfileToken = self.token
@@ -140,9 +116,6 @@ class ONVIFCamera:
         return {"status": "error", "message": f"Preset '{preset_name}' not found"}
 
     def go_to_preset(self, preset_name: str) -> dict:
-        """
-        Go to a saved preset position by name.
-        """
         presets = self._get_presets_complete()
         request = self.ptz.create_type('GotoPreset')
         request.ProfileToken = self.token
@@ -154,16 +127,11 @@ class ONVIFCamera:
         return {"status": "error", "message": f"Preset '{preset_name}' not found"}
 
     async def capture_snapshot(self, output_dir: str = "/tmp") -> str:
-        """
-        Capture a still JPEG snapshot and save it to output_dir.
-        """
-        # Get the snapshot URI
         request = self.media.create_type('GetSnapshotUri')
         request.ProfileToken = self.token
         res = self.media.GetSnapshotUri(request)
         uri = res.Uri
 
-        # Download the image using Digest Auth
         auth = httpx.DigestAuth(self.username, self.password)
         async with httpx.AsyncClient(verify=False) as client:
             response = await client.get(uri, auth=auth)
@@ -179,89 +147,95 @@ class ONVIFCamera:
             
             return os.path.abspath(filepath)
 
-# --- MCP Server ---
+# --- MCP Server & Lazy Init ---
 
 mcp = FastMCP("Tapo PTZ")
-camera_instance: Optional[ONVIFCamera] = None
+_camera_instance: Optional[ONVIFCamera] = None
+
+def get_camera() -> ONVIFCamera:
+    """Lazy initialize the camera connection."""
+    global _camera_instance
+    if _camera_instance is None:
+        ip = os.getenv("TAPO_IP")
+        port = int(os.getenv("TAPO_PORT", "2020"))
+        username = os.getenv("TAPO_USERNAME")
+        password = os.getenv("TAPO_PASSWORD")
+        
+        if not all([ip, username, password]):
+            raise ValueError("TAPO_IP, TAPO_USERNAME, and TAPO_PASSWORD environment variables must be set.")
+        
+        try:
+            _camera_instance = ONVIFCamera(ip, port, username, password)
+        except Exception as e:
+            logger.error(f"Failed to connect to camera: {e}")
+            raise RuntimeError(f"Could not connect to camera at {ip}:{port}. Verify IP and ONVIF credentials.")
+            
+    return _camera_instance
 
 @mcp.tool()
 def absolute_move(pan: float, tilt: float, zoom: float) -> dict:
     """Move to absolute PTZ position (pan/tilt -1 to 1, zoom 0 to 1)."""
-    return camera_instance.absolute_move(pan, tilt, zoom)
+    return get_camera().absolute_move(pan, tilt, zoom)
 
 @mcp.tool()
 def continuous_move(pan: float, tilt: float, zoom: float) -> dict:
     """Start continuous movement at given speeds (typically -1.0 to 1.0)."""
-    return camera_instance.continuous_move(pan, tilt, zoom)
+    return get_camera().continuous_move(pan, tilt, zoom)
 
 @mcp.tool()
 def relative_move(pan: float, tilt: float, zoom: float) -> dict:
     """Move relative to the current position."""
-    return camera_instance.relative_move(pan, tilt, zoom)
+    return get_camera().relative_move(pan, tilt, zoom)
 
 @mcp.tool()
 def stop_move() -> dict:
     """Stop all PTZ movement."""
-    return camera_instance.stop_move()
+    return get_camera().stop_move()
 
 @mcp.tool()
 def set_home_position() -> dict:
     """Save current position as the camera's home."""
-    return camera_instance.set_home_position()
+    return get_camera().set_home_position()
 
 @mcp.tool()
 def go_home_position() -> dict:
     """Return the camera to its home position."""
-    return camera_instance.go_home_position()
+    return get_camera().go_home_position()
 
 @mcp.tool()
 def get_ptz_status() -> dict:
     """Query current PTZ coordinates. Returns {"pan": float, "tilt": float, "zoom": float}."""
-    pan, tilt, zoom = camera_instance.get_ptz_status()
+    pan, tilt, zoom = get_camera().get_ptz_status()
     return {"pan": pan, "tilt": tilt, "zoom": zoom}
 
 @mcp.tool()
 def set_preset(preset_name: str) -> dict:
     """Save current position as a named preset."""
-    return camera_instance.set_preset(preset_name)
+    return get_camera().set_preset(preset_name)
 
 @mcp.tool()
 def get_presets() -> List[Tuple[int, str]]:
     """List all saved presets as (index, name)."""
-    return camera_instance.get_presets()
+    return get_camera().get_presets()
 
 @mcp.tool()
 def remove_preset(preset_name: str) -> dict:
     """Delete a named preset."""
-    return camera_instance.remove_preset(preset_name)
+    return get_camera().remove_preset(preset_name)
 
 @mcp.tool()
 def go_to_preset(preset_name: str) -> dict:
     """Move the camera to a saved preset."""
-    return camera_instance.go_to_preset(preset_name)
+    return get_camera().go_to_preset(preset_name)
 
 @mcp.tool()
 async def capture_snapshot(output_dir: str = "/tmp") -> str:
     """Grab a still JPEG snapshot from the camera and save it locally."""
-    return await camera_instance.capture_snapshot(output_dir)
+    return await get_camera().capture_snapshot(output_dir)
 
 def main():
-    global camera_instance
-    
-    ip = os.getenv("TAPO_IP")
-    port = int(os.getenv("TAPO_PORT", "2020"))
-    username = os.getenv("TAPO_USERNAME")
-    password = os.getenv("TAPO_PASSWORD")
-    
-    if not all([ip, username, password]):
-        print("Error: TAPO_IP, TAPO_USERNAME, and TAPO_PASSWORD environment variables must be set.")
-        return
-
-    try:
-        camera_instance = ONVIFCamera(ip, port, username, password)
-        mcp.run()
-    except Exception as e:
-        print(f"Failed to connect to camera at {ip}:{port}: {e}")
+    # Run the server immediately. Connection happens on first tool call.
+    mcp.run()
 
 if __name__ == "__main__":
     main()
