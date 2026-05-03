@@ -1,14 +1,22 @@
 import os
 import datetime
 import logging
+import sys
 from typing import Tuple, List, Optional
 import httpx
 from onvif import ONVIFCamera as ONVIFCameraClient
+from zeep.transports import Transport
 from fastmcp import FastMCP
 
-# Configure logging to stderr for MCP compatibility
-logging.basicConfig(level=logging.INFO)
+# Configure logging to stderr for MCP compatibility and visibility
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
+)
 logger = logging.getLogger("mcp-tapoptz")
+# Set zeep logging to see transport issues
+logging.getLogger('zeep.transports').setLevel(logging.INFO)
 
 class ONVIFCamera:
     """
@@ -17,19 +25,42 @@ class ONVIFCamera:
 
     def __init__(self, ip: str, port: int, username: str, password: str):
         logger.info(f"Connecting to camera at {ip}:{port}...")
-        self.camera = ONVIFCameraClient(ip, port, username, password)
-        self.ptz = self.camera.create_ptz_service()
-        self.media = self.camera.create_media_service()
-        self.username = username
-        self.password = password
+        
+        # Configure transport with explicit timeouts (in seconds)
+        # to prevent indefinite hanging
+        transport = Transport(timeout=10, operation_timeout=10)
+        
+        try:
+            self.camera = ONVIFCameraClient(
+                ip, 
+                port, 
+                username, 
+                password, 
+                transport=transport
+            )
+            
+            # Create services
+            logger.info("Initializing PTZ service...")
+            self.ptz = self.camera.create_ptz_service()
+            
+            logger.info("Initializing Media service...")
+            self.media = self.camera.create_media_service()
+            
+            self.username = username
+            self.password = password
 
-        # Fetch the first profile token
-        logger.info("Fetching media profiles...")
-        profiles = self.media.GetProfiles()
-        if not profiles:
-            raise Exception("No media profiles found on camera")
-        self.token = profiles[0].token
-        logger.info(f"Connected successfully. Using profile token: {self.token}")
+            # Fetch the first profile token
+            logger.info("Fetching media profiles...")
+            profiles = self.media.GetProfiles()
+            if not profiles:
+                raise Exception("No media profiles found on camera")
+            
+            self.token = profiles[0].token
+            logger.info(f"Connected successfully. Using profile token: {self.token}")
+            
+        except Exception as e:
+            logger.error(f"Failed during ONVIF initialization: {e}")
+            raise
 
     def absolute_move(self, pan: float, tilt: float, zoom: float) -> dict:
         request = self.ptz.create_type('AbsoluteMove')
@@ -95,8 +126,9 @@ class ONVIFCamera:
     def get_presets(self) -> List[Tuple[int, str]]:
         ptz_get_presets = self._get_presets_complete()
         presets = []
-        for i, preset in enumerate(ptz_get_presets):
-            presets.append((i, str(preset.Name)))
+        if ptz_get_presets:
+            for i, preset in enumerate(ptz_get_presets):
+                presets.append((i, str(preset.Name)))
         return presets
 
     def _get_presets_complete(self):
@@ -157,7 +189,13 @@ def get_camera() -> ONVIFCamera:
     global _camera_instance
     if _camera_instance is None:
         ip = os.getenv("TAPO_IP")
-        port = int(os.getenv("TAPO_PORT", "2020"))
+        port_env = os.getenv("TAPO_PORT", "2020")
+        try:
+            port = int(port_env)
+        except ValueError:
+            logger.error(f"Invalid TAPO_PORT: {port_env}. Defaulting to 2020.")
+            port = 2020
+            
         username = os.getenv("TAPO_USERNAME")
         password = os.getenv("TAPO_PASSWORD")
         
@@ -168,7 +206,7 @@ def get_camera() -> ONVIFCamera:
             _camera_instance = ONVIFCamera(ip, port, username, password)
         except Exception as e:
             logger.error(f"Failed to connect to camera: {e}")
-            raise RuntimeError(f"Could not connect to camera at {ip}:{port}. Verify IP and ONVIF credentials.")
+            raise RuntimeError(f"Could not connect to camera at {ip}:{port}. Error: {e}")
             
     return _camera_instance
 
@@ -234,7 +272,7 @@ async def capture_snapshot(output_dir: str = "/tmp") -> str:
     return await get_camera().capture_snapshot(output_dir)
 
 def main():
-    # Run the server immediately. Connection happens on first tool call.
+    # Run the server. Connection happens on first tool call.
     mcp.run()
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ requires-python = ">=3.9"
 dependencies = [
     "fastmcp>=2.0",
     "onvif-zeep>=0.2.0",
+    "zeep",
     "httpx",
 ]
 
