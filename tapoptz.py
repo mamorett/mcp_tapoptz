@@ -2,10 +2,13 @@ import os
 import datetime
 import logging
 import sys
+import asyncio
+import socket
 from typing import Tuple, List, Optional
 import httpx
 from onvif import ONVIFCamera as ONVIFCameraClient
 from zeep.transports import Transport
+from zeep.cache import InMemoryCache
 from fastmcp import FastMCP
 
 # Configure logging to stderr for MCP compatibility and visibility
@@ -24,11 +27,18 @@ class ONVIFCamera:
     """
 
     def __init__(self, ip: str, port: int, username: str, password: str):
-        logger.info(f"Connecting to camera at {ip}:{port}...")
+        logger.info(f"Attempting reachability check for {ip}:{port}...")
+        try:
+            with socket.create_connection((ip, port), timeout=5):
+                logger.info(f"Port {port} is open and reachable.")
+        except Exception as e:
+            logger.error(f"Reachability check failed: {e}")
+            raise ConnectionError(f"Cannot reach camera at {ip}:{port}. Is the IP correct and the camera online?")
+
+        logger.info(f"Connecting to ONVIF service...")
         
-        # Configure transport with explicit timeouts (in seconds)
-        # to prevent indefinite hanging
-        transport = Transport(timeout=10, operation_timeout=10)
+        # Use InMemoryCache and explicit timeouts to avoid file system or network hangs
+        transport = Transport(timeout=10, operation_timeout=10, cache=InMemoryCache())
         
         try:
             self.camera = ONVIFCameraClient(
@@ -39,7 +49,7 @@ class ONVIFCamera:
                 transport=transport
             )
             
-            # Create services
+            # Create services - these calls can be slow as they load WSDLs
             logger.info("Initializing PTZ service...")
             self.ptz = self.camera.create_ptz_service()
             
@@ -179,100 +189,122 @@ class ONVIFCamera:
             
             return os.path.abspath(filepath)
 
-# --- MCP Server & Lazy Init ---
+# --- MCP Server & Global State ---
 
 mcp = FastMCP("Tapo PTZ")
 _camera_instance: Optional[ONVIFCamera] = None
+# A lock to prevent multiple simultaneous connection attempts
+_conn_lock = asyncio.Lock()
 
-def get_camera() -> ONVIFCamera:
-    """Lazy initialize the camera connection."""
+async def get_camera() -> ONVIFCamera:
+    """Lazy initialize the camera connection in a thread-safe way."""
     global _camera_instance
-    if _camera_instance is None:
-        ip = os.getenv("TAPO_IP")
-        port_env = os.getenv("TAPO_PORT", "2020")
-        try:
-            port = int(port_env)
-        except ValueError:
-            logger.error(f"Invalid TAPO_PORT: {port_env}. Defaulting to 2020.")
-            port = 2020
+    async with _conn_lock:
+        if _camera_instance is None:
+            ip = os.getenv("TAPO_IP")
+            port_env = os.getenv("TAPO_PORT", "2020")
+            try:
+                port = int(port_env)
+            except ValueError:
+                port = 2020
+                
+            username = os.getenv("TAPO_USERNAME")
+            password = os.getenv("TAPO_PASSWORD")
             
-        username = os.getenv("TAPO_USERNAME")
-        password = os.getenv("TAPO_PASSWORD")
-        
-        if not all([ip, username, password]):
-            raise ValueError("TAPO_IP, TAPO_USERNAME, and TAPO_PASSWORD environment variables must be set.")
-        
-        try:
-            _camera_instance = ONVIFCamera(ip, port, username, password)
-        except Exception as e:
-            logger.error(f"Failed to connect to camera: {e}")
-            raise RuntimeError(f"Could not connect to camera at {ip}:{port}. Error: {e}")
+            if not all([ip, username, password]):
+                raise ValueError("TAPO_IP, TAPO_USERNAME, and TAPO_PASSWORD environment variables must be set.")
             
-    return _camera_instance
+            # Use asyncio.to_thread to avoid blocking the event loop during initialization
+            try:
+                logger.info("Initializing camera connection in background thread...")
+                _camera_instance = await asyncio.to_thread(ONVIFCamera, ip, port, username, password)
+            except Exception as e:
+                logger.error(f"Failed to connect to camera: {e}")
+                raise RuntimeError(f"Connection failed: {e}")
+                
+        return _camera_instance
+
+# Wrapper to add timeout to all camera operations
+async def call_with_timeout(func, *args, **kwargs):
+    cam = await get_camera()
+    try:
+        # Wrap the synchronous ONVIF call in to_thread and wait_for
+        target_func = getattr(cam, func.__name__)
+        return await asyncio.wait_for(asyncio.to_thread(target_func, *args, **kwargs), timeout=15.0)
+    except asyncio.TimeoutError:
+        logger.error(f"Operation {func.__name__} timed out after 15s")
+        return {"status": "error", "message": "Operation timed out. The camera might be slow or disconnected."}
+    except Exception as e:
+        logger.error(f"Error during {func.__name__}: {e}")
+        return {"status": "error", "message": str(e)}
 
 @mcp.tool()
-def absolute_move(pan: float, tilt: float, zoom: float) -> dict:
+async def absolute_move(pan: float, tilt: float, zoom: float) -> dict:
     """Move to absolute PTZ position (pan/tilt -1 to 1, zoom 0 to 1)."""
-    return get_camera().absolute_move(pan, tilt, zoom)
+    return await call_with_timeout(absolute_move, pan, tilt, zoom)
 
 @mcp.tool()
-def continuous_move(pan: float, tilt: float, zoom: float) -> dict:
+async def continuous_move(pan: float, tilt: float, zoom: float) -> dict:
     """Start continuous movement at given speeds (typically -1.0 to 1.0)."""
-    return get_camera().continuous_move(pan, tilt, zoom)
+    return await call_with_timeout(continuous_move, pan, tilt, zoom)
 
 @mcp.tool()
-def relative_move(pan: float, tilt: float, zoom: float) -> dict:
+async def relative_move(pan: float, tilt: float, zoom: float) -> dict:
     """Move relative to the current position."""
-    return get_camera().relative_move(pan, tilt, zoom)
+    return await call_with_timeout(relative_move, pan, tilt, zoom)
 
 @mcp.tool()
-def stop_move() -> dict:
+async def stop_move() -> dict:
     """Stop all PTZ movement."""
-    return get_camera().stop_move()
+    return await call_with_timeout(stop_move)
 
 @mcp.tool()
-def set_home_position() -> dict:
+async def set_home_position() -> dict:
     """Save current position as the camera's home."""
-    return get_camera().set_home_position()
+    return await call_with_timeout(set_home_position)
 
 @mcp.tool()
-def go_home_position() -> dict:
+async def go_home_position() -> dict:
     """Return the camera to its home position."""
-    return get_camera().go_home_position()
+    return await call_with_timeout(go_home_position)
 
 @mcp.tool()
-def get_ptz_status() -> dict:
+async def get_ptz_status() -> dict:
     """Query current PTZ coordinates. Returns {"pan": float, "tilt": float, "zoom": float}."""
-    pan, tilt, zoom = get_camera().get_ptz_status()
-    return {"pan": pan, "tilt": tilt, "zoom": zoom}
+    res = await call_with_timeout(get_ptz_status)
+    if isinstance(res, tuple):
+        pan, tilt, zoom = res
+        return {"pan": pan, "tilt": tilt, "zoom": zoom}
+    return res
 
 @mcp.tool()
-def set_preset(preset_name: str) -> dict:
+async def set_preset(preset_name: str) -> dict:
     """Save current position as a named preset."""
-    return get_camera().set_preset(preset_name)
+    return await call_with_timeout(set_preset, preset_name)
 
 @mcp.tool()
-def get_presets() -> List[Tuple[int, str]]:
+async def get_presets() -> List[Tuple[int, str]]:
     """List all saved presets as (index, name)."""
-    return get_camera().get_presets()
+    res = await call_with_timeout(get_presets)
+    return res if isinstance(res, list) else []
 
 @mcp.tool()
-def remove_preset(preset_name: str) -> dict:
+async def remove_preset(preset_name: str) -> dict:
     """Delete a named preset."""
-    return get_camera().remove_preset(preset_name)
+    return await call_with_timeout(remove_preset, preset_name)
 
 @mcp.tool()
-def go_to_preset(preset_name: str) -> dict:
+async def go_to_preset(preset_name: str) -> dict:
     """Move the camera to a saved preset."""
-    return get_camera().go_to_preset(preset_name)
+    return await call_with_timeout(go_to_preset, preset_name)
 
 @mcp.tool()
 async def capture_snapshot(output_dir: str = "/tmp") -> str:
     """Grab a still JPEG snapshot from the camera and save it locally."""
-    return await get_camera().capture_snapshot(output_dir)
+    cam = await get_camera()
+    return await asyncio.wait_for(cam.capture_snapshot(output_dir), timeout=20.0)
 
 def main():
-    # Run the server. Connection happens on first tool call.
     mcp.run()
 
 if __name__ == "__main__":
