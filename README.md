@@ -10,11 +10,11 @@ Easily move your camera, manage presets, and capture still images directly from 
 
 ## ✨ Features
 
-- 🏎️ **PTZ Control**: Absolute, Relative, and Continuous movement.
+- 🏎️ **PTZ Control**: Absolute, Relative, and Continuous movement via ONVIF.
 - 📍 **Preset Management**: Save, go to, and remove named camera positions.
 - 🏠 **Home Position**: Quickly set or return to your camera's "home" base.
-- 📸 **Snapshots**: Capture still JPEG images and save them locally.
-- 🔌 **ONVIF Support**: Works with Tapo cameras (C200, C210, C500, etc.) and most ONVIF-compliant devices.
+- 📸 **RTSP Snapshots**: High-quality still image capture directly from the `/stream1` RTSP feed.
+- 🔌 **Wide Compatibility**: Works with Tapo cameras (C200, C210, C500, etc.) and most ONVIF/RTSP compliant devices.
 
 ---
 
@@ -25,8 +25,8 @@ You can run `mcp-tapoptz` directly from GitHub using `uvx`.
 ```bash
 # Set your environment variables
 export TAPO_IP="192.168.1.50"
-export TAPO_USERNAME="your_onvif_user"
-export TAPO_PASSWORD="your_onvif_password"
+export TAPO_USERNAME="your_camera_account_user"
+export TAPO_PASSWORD="your_camera_account_password"
 
 # Run directly from the GitHub repository
 uvx --from git+https://github.com/mamorett/mcp_tapoptz mcp-tapoptz
@@ -45,8 +45,9 @@ Add this to your `claude_desktop_config.json`:
       "env": {
         "TAPO_IP": "192.168.1.50",
         "TAPO_PORT": "2020",
-        "TAPO_USERNAME": "your_onvif_user",
-        "TAPO_PASSWORD": "your_onvif_password"
+        "TAPO_RTSP_PORT": "554",
+        "TAPO_USERNAME": "your_camera_account_user",
+        "TAPO_PASSWORD": "your_camera_account_password"
       }
     }
   }
@@ -82,7 +83,7 @@ Add this to your `claude_desktop_config.json`:
 
 | Tool | Parameters | Description |
 | :--- | :--- | :--- |
-| `capture_snapshot` | `output_dir` (optional) | Grab a still JPEG from the camera and save it to the specified directory (defaults to `/tmp`). |
+| `capture_snapshot` | `output_dir` (optional) | Grab a still JPEG from the camera's RTSP `/stream1` feed and save it to the specified directory (defaults to `/tmp`). |
 
 ---
 
@@ -91,16 +92,17 @@ Add this to your `claude_desktop_config.json`:
 | Variable | Required | Default | Description |
 | :--- | :---: | :--- | :--- |
 | `TAPO_IP` | **Yes** | - | The local IP address of your Tapo camera. |
-| `TAPO_USERNAME` | **Yes** | - | Your camera's ONVIF username (set in the Tapo App). |
-| `TAPO_PASSWORD` | **Yes** | - | Your camera's ONVIF password (set in the Tapo App). |
+| `TAPO_USERNAME` | **Yes** | - | Your camera's **Camera Account** username (set in the Tapo App). |
+| `TAPO_PASSWORD` | **Yes** | - | Your camera's **Camera Account** password (set in the Tapo App). |
 | `TAPO_PORT` | No | `2020` | The ONVIF service port (usually 2020 for Tapo). |
+| `TAPO_RTSP_PORT` | No | `554` | The RTSP stream port (usually 554 for Tapo). |
 
 ---
 
 ## 📋 Prerequisites
 
-1.  **Enable ONVIF**: Open the Tapo app, go to `Camera Settings` -> `Advanced Settings` -> `Camera Account`, and create an account. This is the username/password you use for `TAPO_USERNAME` and `TAPO_PASSWORD`.
-2.  **Network Visibility**: Ensure the machine running this MCP server can reach the camera's IP address on the specified port.
+1.  **Enable Camera Account**: Open the Tapo app, go to `Camera Settings` -> `Advanced Settings` -> `Camera Account`, and create an account. This is **NOT** your TP-Link ID; it is a dedicated local account for ONVIF/RTSP.
+2.  **Network Visibility**: Ensure the machine running this MCP server can reach the camera's IP address on ports 2020 and 554.
 
 ---
 
