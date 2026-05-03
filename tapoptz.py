@@ -192,26 +192,57 @@ class ONVIFCamera:
                 return {"status": "success", "action": "go_to_preset", "name": preset_name}
         return {"status": "error", "message": f"Preset '{preset_name}' not found"}
 
-    async def capture_snapshot(self, output_dir: str = "/tmp") -> str:
-        request = self.media.create_type('GetSnapshotUri')
-        request.ProfileToken = self.token
-        res = self.media.GetSnapshotUri(request)
-        uri = res.Uri
+    async def capture_snapshot(self, output_dir: str = "/tmp") -> dict:
+        """
+        Capture a still JPEG snapshot and save it to output_dir.
+        """
+        try:
+            logger.info("Requesting snapshot URI from camera...")
+            request = self.media.create_type('GetSnapshotUri')
+            request.ProfileToken = self.token
+            res = self.media.GetSnapshotUri(request)
+            
+            if not res or not hasattr(res, 'Uri') or not res.Uri:
+                return {"status": "error", "message": "Camera did not return a snapshot URI. This model might not support ONVIF snapshots."}
+            
+            uri = res.Uri
+            logger.info(f"Snapshot URI obtained: {uri}")
 
-        auth = httpx.DigestAuth(self.username, self.password)
-        async with httpx.AsyncClient(verify=False) as client:
-            response = await client.get(uri, auth=auth)
-            response.raise_for_status()
-            
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"snapshot_{timestamp}.jpg"
-            filepath = os.path.join(output_dir, filename)
-            
-            os.makedirs(output_dir, exist_ok=True)
-            with open(filepath, "wb") as f:
-                f.write(response.content)
-            
-            return os.path.abspath(filepath)
+            # Download the image using Digest Auth
+            auth = httpx.DigestAuth(self.username, self.password)
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                logger.info(f"Downloading snapshot from {uri}...")
+                response = await client.get(uri, auth=auth)
+                
+                if response.status_code == 401:
+                    logger.warning("Digest authentication failed, attempting without authentication...")
+                    response = await client.get(uri)
+                
+                response.raise_for_status()
+                
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"snapshot_{timestamp}.jpg"
+                
+                # Ensure output_dir is absolute and exists
+                abs_output_dir = os.path.abspath(output_dir)
+                os.makedirs(abs_output_dir, exist_ok=True)
+                
+                filepath = os.path.join(abs_output_dir, filename)
+                
+                logger.info(f"Writing {len(response.content)} bytes to {filepath}...")
+                with open(filepath, "wb") as f:
+                    f.write(response.content)
+                
+                return {
+                    "status": "success", 
+                    "action": "capture_snapshot",
+                    "path": filepath,
+                    "size": len(response.content),
+                    "uri": uri
+                }
+        except Exception as e:
+            logger.error(f"Snapshot capture failed: {e}")
+            return {"status": "error", "message": f"Snapshot failed: {str(e)}"}
 
 # --- MCP Server & Global State ---
 
@@ -321,10 +352,16 @@ async def go_to_preset(preset_name: str) -> dict:
     return await call_with_timeout("go_to_preset", preset_name)
 
 @mcp.tool()
-async def capture_snapshot(output_dir: str = "/tmp") -> str:
+async def capture_snapshot(output_dir: str = "/tmp") -> dict:
     """Grab a still JPEG snapshot from the camera and save it locally."""
     cam = await get_camera()
-    return await asyncio.wait_for(cam.capture_snapshot(output_dir), timeout=20.0)
+    # capture_snapshot is already async, so we just wrap in wait_for
+    try:
+        return await asyncio.wait_for(cam.capture_snapshot(output_dir), timeout=25.0)
+    except asyncio.TimeoutError:
+        return {"status": "error", "message": "Snapshot capture timed out after 25s"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @mcp.tool()
 async def diagnostic_check() -> dict:
