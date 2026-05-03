@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tapoptz"
+version = "0.1.0"
+description = "FastMCP server for managing Tapo camera PTZ"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "fastmcp>=2.0",
+    "onvif-zeep>=0.2.0",
+    "httpx",
+]
+
+[project.scripts]
+tapoptz = "tapoptz:main"
+
+[tool.hatch.build.targets.wheel]
+include = ["tapoptz.py"]
