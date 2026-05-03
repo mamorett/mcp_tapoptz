@@ -4,6 +4,7 @@ import logging
 import sys
 import asyncio
 import socket
+import traceback
 from typing import Tuple, List, Optional, Any, Dict
 import httpx
 from onvif import ONVIFCamera as ONVIFCameraClient
@@ -49,7 +50,7 @@ class ONVIFCamera:
                 transport=transport
             )
             
-            # Create services - these calls can be slow as they load WSDLs
+            # Create services
             logger.info("Initializing PTZ service...")
             self.ptz = self.camera.create_ptz_service()
             
@@ -69,13 +70,12 @@ class ONVIFCamera:
             logger.info(f"Connected successfully. Using profile token: {self.token}")
             
         except Exception as e:
-            logger.error(f"Failed during ONVIF initialization: {e}")
+            logger.error(f"Failed during ONVIF initialization: {traceback.format_exc()}")
             raise
 
     def absolute_move(self, pan: float, tilt: float, zoom: float) -> dict:
         request = self.ptz.create_type('AbsoluteMove')
         request.ProfileToken = self.token
-        # Position expects PTZVector { PanTilt: Vector2D, Zoom: Vector1D }
         request.Position = {
             'PanTilt': {'x': pan, 'y': tilt}, 
             'Zoom': {'x': zoom}
@@ -86,7 +86,6 @@ class ONVIFCamera:
     def continuous_move(self, pan: float, tilt: float, zoom: float) -> dict:
         request = self.ptz.create_type('ContinuousMove')
         request.ProfileToken = self.token
-        # Velocity expects PTZSpeed { PanTilt: Vector2D, Zoom: Vector1D }
         request.Velocity = {
             'PanTilt': {'x': pan, 'y': tilt}, 
             'Zoom': {'x': zoom}
@@ -97,7 +96,6 @@ class ONVIFCamera:
     def relative_move(self, pan: float, tilt: float, zoom: float) -> dict:
         request = self.ptz.create_type('RelativeMove')
         request.ProfileToken = self.token
-        # Translation expects PTZVector { PanTilt: Vector2D, Zoom: Vector1D }
         request.Translation = {
             'PanTilt': {'x': pan, 'y': tilt}, 
             'Zoom': {'x': zoom}
@@ -198,35 +196,39 @@ class ONVIFCamera:
         """
         try:
             logger.info("Requesting snapshot URI from camera...")
-            request = self.media.create_type('GetSnapshotUri')
-            request.ProfileToken = self.token
-            res = self.media.GetSnapshotUri(request)
+            # We wrap the sync media call in a thread
+            def get_uri():
+                req = self.media.create_type('GetSnapshotUri')
+                req.ProfileToken = self.token
+                return self.media.GetSnapshotUri(req)
+                
+            res = await asyncio.to_thread(get_uri)
             
             if not res or not hasattr(res, 'Uri') or not res.Uri:
-                return {"status": "error", "message": "Camera did not return a snapshot URI. This model might not support ONVIF snapshots."}
+                return {"status": "error", "message": "Camera did not return a snapshot URI."}
             
             uri = res.Uri
             logger.info(f"Snapshot URI obtained: {uri}")
 
             # Download the image using Digest Auth
             auth = httpx.DigestAuth(self.username, self.password)
-            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
                 logger.info(f"Downloading snapshot from {uri}...")
-                response = await client.get(uri, auth=auth)
-                
-                if response.status_code == 401:
-                    logger.warning("Digest authentication failed, attempting without authentication...")
-                    response = await client.get(uri)
+                try:
+                    response = await client.get(uri, auth=auth)
+                    if response.status_code == 401:
+                        logger.warning("Digest authentication failed, attempting without authentication...")
+                        response = await client.get(uri)
+                except Exception as net_err:
+                    logger.error(f"Network error downloading snapshot: {net_err}")
+                    return {"status": "error", "message": f"Network error: {str(net_err)}"}
                 
                 response.raise_for_status()
                 
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"snapshot_{timestamp}.jpg"
-                
-                # Ensure output_dir is absolute and exists
                 abs_output_dir = os.path.abspath(output_dir)
                 os.makedirs(abs_output_dir, exist_ok=True)
-                
                 filepath = os.path.join(abs_output_dir, filename)
                 
                 logger.info(f"Writing {len(response.content)} bytes to {filepath}...")
@@ -241,14 +243,16 @@ class ONVIFCamera:
                     "uri": uri
                 }
         except Exception as e:
-            logger.error(f"Snapshot capture failed: {e}")
-            return {"status": "error", "message": f"Snapshot failed: {str(e)}"}
+            logger.error(f"Snapshot capture failed: {traceback.format_exc()}")
+            # Return more info in the message
+            err_type = type(e).__name__
+            err_msg = str(e) if str(e) else "No error message"
+            return {"status": "error", "message": f"Snapshot failed [{err_type}]: {err_msg}"}
 
 # --- MCP Server & Global State ---
 
 mcp = FastMCP("Tapo PTZ")
 _camera_instance: Optional[ONVIFCamera] = None
-# A lock to prevent multiple simultaneous connection attempts
 _conn_lock = asyncio.Lock()
 
 async def get_camera() -> ONVIFCamera:
@@ -269,30 +273,26 @@ async def get_camera() -> ONVIFCamera:
             if not all([ip, username, password]):
                 raise ValueError("TAPO_IP, TAPO_USERNAME, and TAPO_PASSWORD environment variables must be set.")
             
-            # Use asyncio.to_thread to avoid blocking the event loop during initialization
             try:
-                logger.info("Initializing camera connection in background thread...")
+                logger.info("Initializing camera connection...")
                 _camera_instance = await asyncio.to_thread(ONVIFCamera, ip, port, username, password)
             except Exception as e:
-                logger.error(f"Failed to connect to camera: {e}")
-                raise RuntimeError(f"Connection failed: {e}")
+                logger.error(f"Failed to connect to camera: {traceback.format_exc()}")
+                raise RuntimeError(f"Connection failed: {str(e)}")
                 
         return _camera_instance
 
-# Wrapper to add timeout to all camera operations
 async def call_with_timeout(func_name, *args, **kwargs):
     cam = await get_camera()
     try:
-        # Wrap the synchronous ONVIF call in to_thread and wait_for
         target_func = getattr(cam, func_name)
         return await asyncio.wait_for(asyncio.to_thread(target_func, *args, **kwargs), timeout=15.0)
     except asyncio.TimeoutError:
         logger.error(f"Operation {func_name} timed out after 15s")
-        return {"status": "error", "message": f"Operation {func_name} timed out. The camera might be slow or disconnected."}
+        return {"status": "error", "message": f"Operation {func_name} timed out."}
     except Exception as e:
-        logger.error(f"Error during {func_name}: {e}")
-        # Ensure we return a string even if e is weird
-        err_msg = str(e) if str(e) else f"Unknown error of type {type(e).__name__}"
+        logger.error(f"Error during {func_name}: {traceback.format_exc()}")
+        err_msg = str(e) if str(e) else f"Unknown {type(e).__name__}"
         return {"status": "error", "message": err_msg}
 
 @mcp.tool()
@@ -327,7 +327,7 @@ async def go_home_position() -> dict:
 
 @mcp.tool()
 async def get_ptz_status() -> dict:
-    """Query current PTZ coordinates. Returns {"pan": float, "tilt": float, "zoom": float}."""
+    """Query current PTZ coordinates."""
     return await call_with_timeout("get_ptz_status")
 
 @mcp.tool()
@@ -337,7 +337,7 @@ async def set_preset(preset_name: str) -> dict:
 
 @mcp.tool()
 async def get_presets() -> List[Tuple[int, str]]:
-    """List all saved presets as (index, name)."""
+    """List all saved presets."""
     res = await call_with_timeout("get_presets")
     return res if isinstance(res, list) else []
 
@@ -354,14 +354,12 @@ async def go_to_preset(preset_name: str) -> dict:
 @mcp.tool()
 async def capture_snapshot(output_dir: str = "/tmp") -> dict:
     """Grab a still JPEG snapshot from the camera and save it locally."""
-    cam = await get_camera()
-    # capture_snapshot is already async, so we just wrap in wait_for
     try:
-        return await asyncio.wait_for(cam.capture_snapshot(output_dir), timeout=25.0)
-    except asyncio.TimeoutError:
-        return {"status": "error", "message": "Snapshot capture timed out after 25s"}
+        cam = await get_camera()
+        return await asyncio.wait_for(cam.capture_snapshot(output_dir), timeout=30.0)
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        logger.error(f"Snapshot tool failed: {traceback.format_exc()}")
+        return {"status": "error", "message": f"Snapshot tool error: {str(e)}"}
 
 @mcp.tool()
 async def diagnostic_check() -> dict:
