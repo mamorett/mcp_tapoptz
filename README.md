@@ -20,7 +20,7 @@ Easily move your camera, manage presets, and capture still images directly from 
 
 ## 🚀 Installation
 
-The easiest way to run `mcp-tapoptz` is using `uvx`.
+You can run `mcp-tapoptz` directly from GitHub using `uvx`.
 
 ```bash
 # Set your environment variables
@@ -28,8 +28,8 @@ export TAPO_IP="192.168.1.50"
 export TAPO_USERNAME="your_onvif_user"
 export TAPO_PASSWORD="your_onvif_password"
 
-# Run the server
-uvx mcp-tapoptz
+# Run directly from the GitHub repository
+uvx --from git+https://github.com/mamorett/mcp_tapoptz mcp-tapoptz
 ```
 
 ### Configuration for Claude Desktop
@@ -41,7 +41,7 @@ Add this to your `claude_desktop_config.json`:
   "mcpServers": {
     "tapo-ptz": {
       "command": "uvx",
-      "args": ["mcp-tapoptz"],
+      "args": ["--from", "git+https://github.com/mamorett/mcp_tapoptz", "mcp-tapoptz"],
       "env": {
         "TAPO_IP": "192.168.1.50",
         "TAPO_PORT": "2020",

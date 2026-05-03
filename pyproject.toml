@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "tapoptz"
+name = "mcp-tapoptz"
 version = "0.1.0"
 description = "FastMCP server for managing Tapo camera PTZ"
 readme = "README.md"
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-tapoptz = "tapoptz:main"
+mcp-tapoptz = "tapoptz:main"
 
 [tool.hatch.build.targets.wheel]
 include = ["tapoptz.py"]
